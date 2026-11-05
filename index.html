@@ -5909,12 +5909,14 @@
   }
   function fjActualizarDesdeDrive(silencioso){
     var msg = document.getElementById("fj_msg"); if (!silencioso) msg.textContent = "Leyendo los archivos de Drive…";
-    return cgFetch("/api/v1/drive/paquete-flujo?refrescar=true").then(function(r){
+    var ctl = typeof AbortController !== "undefined" ? new AbortController() : null, tmo = ctl ? setTimeout(function(){ ctl.abort(); }, 240000) : null;
+    return cgFetch("/api/v1/drive/paquete-flujo?refrescar=true", ctl ? { signal: ctl.signal } : {}).then(function(r){
+      if (tmo) clearTimeout(tmo);
       if (r.status === 401) throw new Error("Tu sesión venció: volvé a iniciar sesión.");
       if (!r.ok) return r.json().then(function(j){ throw new Error((j && j.detail) || ("El servidor respondió " + r.status)); }, function(){ throw new Error("El servidor respondió " + r.status); });
       return r.json();
     }).then(function(P){ fjEstado.paquete = P; fjEstado.cargado = new Date().toLocaleString("es-AR") + " (Drive)"; save("finetia_flujo13", fjEstado); renderFlujo13(); })
-      .catch(function(e){ msg.textContent = e.message || "No se pudo leer Drive."; });
+      .catch(function(e){ if (tmo) clearTimeout(tmo); msg.textContent = e && e.name === "AbortError" ? "El servidor tardó más de 4 minutos. Esperá un momento y volvé a tocar Actualizar." : (e.message || "No se pudo leer Drive."); });
   }
   function renderFlujo13(){
     var box = document.getElementById("fj_resultado"), msg = document.getElementById("fj_msg"), pnl = document.getElementById("fj_supuestos");
