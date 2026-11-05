@@ -1445,7 +1445,7 @@
     if (id === "proyeccion") renderProyeccion();
     if (id === "banco") renderDatosReales();
     if (id === "tesoreria") renderTesoreria();
-    if (id === "flujo13") renderFlujo13();
+    if (id === "flujo13") { renderFlujo13(); if (fjEstado && fjEstado.paquete && getAuthToken() && !bnHayRitmo()) fjAsegurarBancos(); }
     if (id === "carga") { renderCarga(); if (!cgEstado && getAuthToken()) cgSincronizar(); }
     window.scrollTo(0,0);
   }
@@ -5434,6 +5434,25 @@
     for (i = 0; i < emps.length; i++) { var sg = rbNorm(emps[i].sigla || ""); if (sg && n.indexOf(" " + sg + " ") >= 0) return emps[i].id; }
     return "";
   }
+  // Empresas del grupo por defecto. Cada sitio nuevo del navegador arranca sin empresas y, sin ellas, las cuentas quedan "sin empresa"
+  // y no se puede estimar el ritmo de pagos. Solo se crean si no hay ninguna; si ya cargaste las tuyas, no se toca nada.
+  var BN_EMPRESAS_GRUPO = [{ nombre: "Hormigones Cardales S.A.", cuit: "30712435344", sigla: "HC" }, { nombre: "Premoldeados de Argentina S.A.", cuit: "30707634355", sigla: "PM" }];
+  function bnAsegurarEmpresas(){
+    if (!(bnEstado.empresas || []).length) bnEstado.empresas = BN_EMPRESAS_GRUPO.map(function(e, i){ return { id: "e" + (i + 1), nombre: e.nombre, cuit: e.cuit, sigla: e.sigla }; });
+    var emps = bnEstado.empresas;
+    var porSigla = function(txt){
+      var n = " " + rbNorm(String(txt || "").replace(/\.[a-z0-9]+$/i, "").replace(/[^a-z0-9]+/gi, " ")) + " ";
+      for (var i = 0; i < emps.length; i++) { var sg = rbNorm(emps[i].sigla || ""); if (sg && n.indexOf(" " + sg + " ") >= 0) return emps[i].id; }
+      return "";
+    };
+    bnEstado.cuentas.forEach(function(c){
+      if (c.empresaId) return;
+      var i, id = ""; for (i = 0; i < emps.length && !id; i++) if (c.cuit && String(emps[i].cuit) === String(c.cuit)) id = emps[i].id;
+      c.empresaId = id || porSigla(c.nombre) || porSigla(c.archivo);
+    });
+    (arEstado.comps || []).forEach(function(c){ if (!c.empresaId) emps.forEach(function(e){ if (c.cuitPropio && String(e.cuit) === String(c.cuitPropio)) c.empresaId = e.id; }); });
+    (arEstado.archivos || []).forEach(function(f){ if (!f.empresaId) emps.forEach(function(e){ if (f.cuitPropio && String(e.cuit) === String(f.cuitPropio)) f.empresaId = e.id; }); });
+  }
   function bnRenderEmpresas(){
     var emps = bnEstado.empresas || [];
     document.getElementById("bn_emp_tabla").style.display = emps.length ? "table" : "none";
@@ -5915,8 +5934,43 @@
       if (r.status === 401) throw new Error("Tu sesión venció: volvé a iniciar sesión.");
       if (!r.ok) return r.json().then(function(j){ throw new Error((j && j.detail) || ("El servidor respondió " + r.status)); }, function(){ throw new Error("El servidor respondió " + r.status); });
       return r.json();
-    }).then(function(P){ fjEstado.paquete = P; fjEstado.cargado = new Date().toLocaleString("es-AR") + " (Drive)"; save("finetia_flujo13", fjEstado); renderFlujo13(); })
+    }).then(function(P){ fjEstado.paquete = P; fjEstado.cargado = new Date().toLocaleString("es-AR") + " (Drive)"; save("finetia_flujo13", fjEstado); renderFlujo13(); return fjAsegurarBancos(); })
       .catch(function(e){ if (tmo) clearTimeout(tmo); msg.textContent = e && e.name === "AbortError" ? "El servidor tardó más de 4 minutos. Esperá un momento y volvé a tocar Actualizar." : (e.message || "No se pudo leer Drive."); });
+  }
+  // El ritmo de pagos sale de los extractos bancarios. Si el navegador no los tiene (sitio nuevo, datos borrados), se bajan de Drive solos.
+  function bnHayRitmo(){
+    var emps = bnEstado.empresas || [];
+    return ["HC", "PM"].some(function(sg){
+      return emps.some(function(e){ return tsSigla(e.sigla || e.nombre) === sg && bnEstado.cuentas.some(function(c){ return c.empresaId === e.id && c.movs && c.movs.length; }); });
+    });
+  }
+  var fjBuscandoBancos = false;
+  function fjAsegurarBancos(){
+    var msg = document.getElementById("fj_msg");
+    bnAsegurarEmpresas();
+    if (bnHayRitmo() || fjBuscandoBancos || !getAuthToken()) { rbGuardar(); renderFlujo13(); return Promise.resolve(); }
+    fjBuscandoBancos = true; msg.textContent = "Buscando los extractos bancarios en Drive…";
+    var listo = cgEstado && cgEstado.conectado ? Promise.resolve() : cgSincronizar(true);
+    return listo.then(function(){
+      var lista = [];
+      ((cgEstado && cgEstado.carpetas) || []).forEach(function(c){ c.archivos.forEach(function(a){
+        var d = cgDestino(a.carpeta);
+        if (d && d.id === "bn_file" && (/\.(xlsx|xls|csv|txt)$/i.test(a.nombre) || a.mime === "application/vnd.google-apps.spreadsheet")) lista.push(a); }); });
+      if (!lista.length) { msg.textContent = "No encontré extractos bancarios en la carpeta Bancos de Drive."; return; }
+      var bajados = [], i = 0, lote = 6;
+      var paso = function(){
+        if (i >= lista.length) return Promise.resolve();
+        var tanda = lista.slice(i, i + lote); i += lote;
+        msg.textContent = "Bajando extractos bancarios de Drive (" + Math.min(i, lista.length) + " de " + lista.length + ")…";
+        return Promise.all(tanda.map(function(a){ return cgBajar(a).catch(function(){ return null; }); })).then(function(fs){ bajados = bajados.concat(fs.filter(Boolean)); return paso(); });
+      };
+      return paso().then(function(){
+        if (!bajados.length) { msg.textContent = "No pude bajar los extractos de Drive."; return; }
+        msg.textContent = "Leyendo " + bajados.length + " extractos bancarios…";
+        return new Promise(function(ok){ bnAlTerminar = ok; cgInyectar("bn_file", bajados); }).then(function(){ bnAsegurarEmpresas(); rbGuardar(); renderFlujo13(); });
+      });
+    }).catch(function(e){ msg.textContent = "No pude bajar los extractos de Drive: " + (e && e.message || e); })
+      .then(function(){ fjBuscandoBancos = false; });
   }
   function renderFlujo13(){
     var box = document.getElementById("fj_resultado"), msg = document.getElementById("fj_msg"), pnl = document.getElementById("fj_supuestos");
@@ -5924,10 +5978,11 @@
     document.getElementById("fj_tabs").style.display = "flex";
     var P = fjEstado.paquete, PP = fjPosicion(), pr = Object.assign({}, FJ_PARAM_DEF, fjEstado.params || {});
     var avisos = [];
-    if (!PP.pos.HC || !PP.pos.PM) { box.innerHTML = '<div class="panel"><div class="alertline" style="border-left:4px solid var(--brass);padding-left:8px;"><span>Falta la posición bancaria: cargá el Excel diario en <b>Tesorería</b> (o desde <b>Carga de datos</b>) para calcular el flujo.</span></div></div>' + fjInforme(P); box.style.display = "block"; pnl.style.display = "none"; return; }
+    var fechaMsg = "Paquete de Drive al " + fjFecha(P.fecha) + "/" + P.fecha.slice(0, 4) + (fjEstado.cargado ? " · cargado " + fjEstado.cargado : "");
+    if (!PP.pos.HC || !PP.pos.PM) { msg.textContent = fechaMsg; box.innerHTML = '<div class="panel"><div class="alertline" style="border-left:4px solid var(--brass);padding-left:8px;"><span>Falta la posición bancaria: cargá el Excel diario en <b>Tesorería</b> (o desde <b>Carga de datos</b>) para calcular el flujo.</span></div></div>' + fjInforme(P); box.style.display = "block"; pnl.style.display = "none"; return; }
     if (!P.tendencia) {
       var TD = bnEstado && bnEstado.cuentas && bnEstado.cuentas.length ? fjTendenciaDe(P, PP.hoy, bnEstado.empresas || [], bnEstado.cuentas) : null;
-      if (!TD) { box.innerHTML = '<div class="panel"><div class="alertline" style="border-left:4px solid var(--brass);padding-left:8px;"><span>Falta estimar el ritmo de pagos y cobranzas nuevas: cargá los extractos de HC y PM en <b>Banco y ARCA</b> (o desde <b>Carga de datos</b>, carpeta Bancos).</span></div></div>' + fjInforme(P); box.style.display = "block"; pnl.style.display = "none"; return; }
+      if (!TD) { msg.textContent = fechaMsg; box.innerHTML = '<div class="panel"><div class="alertline" style="border-left:4px solid var(--brass);padding-left:8px;"><span>Falta estimar el ritmo de pagos y cobranzas nuevas: cargá los extractos de HC y PM en <b>Banco y ARCA</b> (o desde <b>Carga de datos</b>, carpeta Bancos).</span></div></div>' + fjInforme(P); box.style.display = "block"; pnl.style.display = "none"; return; }
       P = Object.assign({}, P, { tendencia: TD.tendencia, cobranza_nueva: TD.cobranza_nueva }); avisos.push("Ritmo de pagos y cobranzas nuevas: últimas 13 semanas completas (" + fjFecha(TD.ventana[0]) + " al " + fjFecha(TD.ventana[1]) + "), de los extractos cargados.");
     }
     var R = fjCalcular(P, PP.pos, PP.hoy, pr), L = R.emp[fjVista], ESP = fjVista === "GRUPO";
@@ -6153,6 +6208,7 @@
     document.getElementById("bn_nombre_wrap").style.display = this.value ? "none" : "block";
   });
   // "0e325cd2-1793630077382_092026_Patagonia_HC.XLS" → "Patagonia HC"
+  var bnAlTerminar = null;
   function bnNombreDeArchivo(nombre){
     var n = String(nombre).replace(/\.[a-z0-9]+$/i, "").replace(/^[0-9a-f]{8}-/i, "").replace(/^\d{9,}_/, "").replace(/^\d{6}[ _-]+/, "").replace(/_/g, " ").trim();
     return n || String(nombre);
@@ -6192,6 +6248,7 @@
         rbGuardar(); renderDatosReales(); renderResumenIfActive();
         rbMsg("bn_estado", resumen.join("\n"), errores ? "error" : "ok");
         document.getElementById("bn_estado").style.whiteSpace = "pre-line";
+        if (bnAlTerminar) { var fin = bnAlTerminar; bnAlTerminar = null; fin(errores); }
         return;
       }
       var file = files[i++];
