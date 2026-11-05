@@ -1445,7 +1445,7 @@
     if (id === "proyeccion") renderProyeccion();
     if (id === "banco") renderDatosReales();
     if (id === "tesoreria") renderTesoreria();
-    if (id === "flujo13") { renderFlujo13(); if (fjEstado && fjEstado.paquete && getAuthToken() && !bnHayRitmo()) fjAsegurarBancos(); }
+    if (id === "flujo13") { renderFlujo13(); if (fjEstado && fjEstado.paquete && getAuthToken() && !fjDatosCompletos()) fjAsegurarBancos(); }
     if (id === "carga") { renderCarga(); if (!cgEstado && getAuthToken()) cgSincronizar(); }
     window.scrollTo(0,0);
   }
@@ -5866,6 +5866,7 @@
     box.innerHTML = h; box.style.display = "block";
   }
   document.getElementById("ts_usar_mov").addEventListener("change", renderTesoreria);
+  var tsAlTerminar = null;
   document.getElementById("ts_file").addEventListener("change", function(ev){
     var file = ev.target.files && ev.target.files[0], msg = document.getElementById("ts_msg"); if (!file) return;
     msg.textContent = "Leyendo…";
@@ -5880,6 +5881,7 @@
         tsEstado = { saldos: S, echeqs: Q, cargado: new Date().toLocaleString("es-AR") };
         save("finetia_tesoreria", tsEstado); renderTesoreria();
       } catch(err) { msg.textContent = "No pude leer el archivo: " + (err && err.message || err); }
+      finally { if (tsAlTerminar) { var fin = tsAlTerminar; tsAlTerminar = null; fin(); } }
     };
     rd.readAsArrayBuffer(file); ev.target.value = "";
   });
@@ -5944,33 +5946,49 @@
       return emps.some(function(e){ return tsSigla(e.sigla || e.nombre) === sg && bnEstado.cuentas.some(function(c){ return c.empresaId === e.id && c.movs && c.movs.length; }); });
     });
   }
+  function tsHayPosicion(){ return !!(tsEstado && tsEstado.saldos && tsEstado.saldos.ok); }
+  function fjDatosCompletos(){ return tsHayPosicion() && bnHayRitmo(); }
   var fjBuscandoBancos = false;
+  // Si al navegador le falta la Tesorería o los extractos (sitio nuevo, datos borrados), los baja de Drive solo.
   function fjAsegurarBancos(){
     var msg = document.getElementById("fj_msg");
     bnAsegurarEmpresas();
-    if (bnHayRitmo() || fjBuscandoBancos || !getAuthToken()) { rbGuardar(); renderFlujo13(); return Promise.resolve(); }
-    fjBuscandoBancos = true; msg.textContent = "Buscando los extractos bancarios en Drive…";
+    if (fjDatosCompletos() || fjBuscandoBancos || !getAuthToken()) { rbGuardar(); renderFlujo13(); return Promise.resolve(); }
+    fjBuscandoBancos = true; msg.textContent = "Buscando los archivos en Drive…";
+    var esXls = function(a){ return /\.(xlsx|xls|csv|txt)$/i.test(a.nombre) || a.mime === "application/vnd.google-apps.spreadsheet"; };
+    var deCarpeta = function(id){
+      var out = []; ((cgEstado && cgEstado.carpetas) || []).forEach(function(c){ c.archivos.forEach(function(a){ var d = cgDestino(a.carpeta); if (d && d.id === id && esXls(a)) out.push(a); }); });
+      return out;
+    };
     var listo = cgEstado && cgEstado.conectado ? Promise.resolve() : cgSincronizar(true);
     return listo.then(function(){
-      var lista = [];
-      ((cgEstado && cgEstado.carpetas) || []).forEach(function(c){ c.archivos.forEach(function(a){
-        var d = cgDestino(a.carpeta);
-        if (d && d.id === "bn_file" && (/\.(xlsx|xls|csv|txt)$/i.test(a.nombre) || a.mime === "application/vnd.google-apps.spreadsheet")) lista.push(a); }); });
-      if (!lista.length) { msg.textContent = "No encontré extractos bancarios en la carpeta Bancos de Drive."; return; }
-      var bajados = [], i = 0, lote = 6;
-      var paso = function(){
-        if (i >= lista.length) return Promise.resolve();
-        var tanda = lista.slice(i, i + lote); i += lote;
-        msg.textContent = "Bajando extractos bancarios de Drive (" + Math.min(i, lista.length) + " de " + lista.length + ")…";
-        return Promise.all(tanda.map(function(a){ return cgBajar(a).catch(function(){ return null; }); })).then(function(fs){ bajados = bajados.concat(fs.filter(Boolean)); return paso(); });
-      };
-      return paso().then(function(){
-        if (!bajados.length) { msg.textContent = "No pude bajar los extractos de Drive."; return; }
-        msg.textContent = "Leyendo " + bajados.length + " extractos bancarios…";
-        return new Promise(function(ok){ bnAlTerminar = ok; cgInyectar("bn_file", bajados); }).then(function(){ bnAsegurarEmpresas(); rbGuardar(); renderFlujo13(); });
+      var paso1 = Promise.resolve();
+      if (!tsHayPosicion()) {
+        var ts = deCarpeta("ts_file").filter(function(a){ return /\.xlsx?$/i.test(a.nombre) || a.mime === "application/vnd.google-apps.spreadsheet"; }).sort(function(x, y){ return x.modificado < y.modificado ? 1 : -1; })[0];
+        if (ts) {
+          msg.textContent = "Bajando la Tesorería de Drive (" + ts.nombre + ")…";
+          paso1 = cgBajar(ts).then(function(f){ return new Promise(function(ok){ tsAlTerminar = ok; cgInyectar("ts_file", [f]); }); }).then(function(){ renderFlujo13(); });
+        } else msg.textContent = "No encontré el Excel diario de Tesorería en Drive.";
+      }
+      return paso1.then(function(){
+        if (bnHayRitmo()) return;
+        var lista = deCarpeta("bn_file");
+        if (!lista.length) { msg.textContent = "No encontré extractos bancarios en la carpeta Bancos de Drive."; return; }
+        var bajados = [], i = 0, lote = 6;
+        var paso = function(){
+          if (i >= lista.length) return Promise.resolve();
+          var tanda = lista.slice(i, i + lote); i += lote;
+          msg.textContent = "Bajando extractos bancarios de Drive (" + Math.min(i, lista.length) + " de " + lista.length + ")…";
+          return Promise.all(tanda.map(function(a){ return cgBajar(a).catch(function(){ return null; }); })).then(function(fs){ bajados = bajados.concat(fs.filter(Boolean)); return paso(); });
+        };
+        return paso().then(function(){
+          if (!bajados.length) { msg.textContent = "No pude bajar los extractos de Drive."; return; }
+          msg.textContent = "Leyendo " + bajados.length + " extractos bancarios…";
+          return new Promise(function(ok){ bnAlTerminar = ok; cgInyectar("bn_file", bajados); }).then(function(){ bnAsegurarEmpresas(); rbGuardar(); });
+        });
       });
-    }).catch(function(e){ msg.textContent = "No pude bajar los extractos de Drive: " + (e && e.message || e); })
-      .then(function(){ fjBuscandoBancos = false; });
+    }).catch(function(e){ msg.textContent = "No pude bajar los archivos de Drive: " + (e && e.message || e); })
+      .then(function(){ fjBuscandoBancos = false; renderFlujo13(); });
   }
   function renderFlujo13(){
     var box = document.getElementById("fj_resultado"), msg = document.getElementById("fj_msg"), pnl = document.getElementById("fj_supuestos");
