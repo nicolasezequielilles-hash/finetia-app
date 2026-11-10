@@ -5251,7 +5251,7 @@
       var T = (P.tendencia || {})[e] || {}, CN = (P.cobranza_nueva || {})[e] || { resto: 0, aesa: 0 };
       var L = { arSist: vec(), echeq: vec(), nuevaResto: vec(), nuevaAesa: vec(), cobranza: vec(),
                 provConocida: vec(), provTend: vec(), proveedores: vec(), sueldos: vec(), nof: vec(), impuestos: vec(), arca: vec(),
-                debitos: vec(), intereses: vec(), otros: vec(), prestamos: vec(), pagos: vec(), resultado: vec(), posicion: vec(), margen: vec(), ajusteVentas: vec(), retIva: vec(), retNueva: vec(),
+                debitos: vec(), intereses: vec(), otros: vec(), prestamos: vec(), pagos: vec(), resultado: vec(), posicion: vec(), margen: vec(), ajusteVentas: vec(), retIva: vec(), retNueva: vec(), finEcheq: vec(),
                 conocidoCob: vec(), conocidoPag: vec(), confianza: vec(), alerta: [] };
       (P.cobranzas || []).forEach(function(c){
         if (c.emp !== e) return;
@@ -5268,7 +5268,8 @@
         add(q.clase === "aesa" ? L.nuevaAesa : L.nuevaResto, sq, impq * fq); add(retNueva, sq, impq * (fq - 1));
       });
       (P.echeqs || []).forEach(function(q){ if (q.emp === e) add(L.echeq, fjSemana(q.venc, w0, hoy, 1), q.importe); });
-      (P.pagos || []).forEach(function(q){ if (q.emp === e) add(L.provConocida, fjSemana(q.venc, w0, hoy, 1), q.importe); });
+      // Los echeqs propios descontados (financiamiento) son deuda financiera que vence: se muestran aparte de Proveedores, sin cambiar el total.
+      (P.pagos || []).forEach(function(q){ if (q.emp !== e) return; var sp = fjSemana(q.venc, w0, hoy, 1); add(L.provConocida, sp, q.importe); if (q.financiamiento) add(L.finEcheq, sp, -q.importe); });
       // Cuotas de préstamos bancarios: importe total de la cuota (capital + intereses + impuestos) en la semana de su vencimiento
       (P.prestamos_cuotas || []).forEach(function(q){ if (q.emp === e) add(L.prestamos, fjSemana(q.vto, w0, hoy, 1), -q.importe); });
       // Calendario de sueldos y NOF (reglas del informe): si el paquete lo trae, reemplaza al ritmo de los extractos
@@ -5296,13 +5297,13 @@
         L.provTend[i] = -(T.pagos_proveedores || 0) * pr.factTendencia * fr;
         // con calendario, el NOF ya figura aparte: se descuenta del ritmo de proveedores para no contarlo dos veces
         if (CAL) L.provTend[i] = Math.max(0, L.provTend[i] - (((P.calendario_nof_ritmo || {})[e]) || 0) * pr.factTendencia * fr);
-        L.proveedores[i] = -Math.max(L.provConocida[i], L.provTend[i]);
+        L.proveedores[i] = -Math.max(0, Math.max(L.provConocida[i], L.provTend[i]) + L.finEcheq[i]);   // finEcheq es negativo: sale de Proveedores y va a su propia línea
         if (!CAL) L.sueldos[i] = (T.sueldos || 0) * pr.factTendencia * fr;
         L.impuestos[i] = (T.impuestos || 0) * pr.factTendencia * fr;
         L.debitos[i] = (T.debitos_auto || 0) * pr.factTendencia * fr;
         L.intereses[i] = (T.intereses_comisiones || 0) * pr.factTendencia * fr;
         L.otros[i] = (T.otros || 0) * pr.factTendencia * fr;
-        L.pagos[i] = L.proveedores[i] + L.sueldos[i] + L.nof[i] + L.impuestos[i] + L.arca[i] + L.debitos[i] + L.intereses[i] + L.otros[i] + L.prestamos[i];
+        L.pagos[i] = L.proveedores[i] + L.sueldos[i] + L.nof[i] + L.impuestos[i] + L.arca[i] + L.debitos[i] + L.intereses[i] + L.otros[i] + L.prestamos[i] + L.finEcheq[i];
         L.resultado[i] = L.cobranza[i] + L.pagos[i];
       }
       var p0 = (pos[e] || {}).caja || 0, ac = (pos[e] || {}).acuerdo || 0, acum = p0;
@@ -5310,14 +5311,14 @@
         acum += L.resultado[k]; L.posicion[k] = acum; L.margen[k] = ac + Math.min(0, acum);
         // confianza = parte del movimiento de la semana que ya está registrada (no estimada)
         L.conocidoCob[k] = L.arSist[k] + L.echeq[k];
-        L.conocidoPag[k] = Math.min(L.provConocida[k], -L.proveedores[k]) + (-L.arca[k]) + (-L.prestamos[k]);
+        L.conocidoPag[k] = Math.min(L.provConocida[k], -L.proveedores[k] - L.finEcheq[k]) + (-L.arca[k]) + (-L.prestamos[k]);
         var den = L.cobranza[k] + (-L.pagos[k]); L.confianza[k] = den > 0 ? (L.conocidoCob[k] + L.conocidoPag[k]) / den : 0;
         L.alerta.push(acum < -ac ? "SUPERA ACUERDOS" : (ac > 0 && L.margen[k] < ac * pr.margenBajo ? "MARGEN BAJO" : ""));
       }
       L.pos0 = p0; L.acuerdo = ac; out.emp[e] = L;
     });
     // Grupo = suma de las empresas. El margen del grupo supone que se pueden pasar fondos entre HC y PM.
-    var G = { pos0: 0, acuerdo: 0 }, keys = ["arSist", "echeq", "nuevaResto", "nuevaAesa", "cobranza", "provConocida", "provTend", "proveedores", "sueldos", "nof", "impuestos", "arca", "debitos", "intereses", "otros", "prestamos", "ajusteVentas", "retIva", "retNueva", "pagos", "resultado", "conocidoCob", "conocidoPag"];
+    var G = { pos0: 0, acuerdo: 0 }, keys = ["arSist", "echeq", "nuevaResto", "nuevaAesa", "cobranza", "provConocida", "provTend", "proveedores", "sueldos", "nof", "impuestos", "arca", "debitos", "intereses", "otros", "prestamos", "finEcheq", "ajusteVentas", "retIva", "retNueva", "pagos", "resultado", "conocidoCob", "conocidoPag"];
     keys.forEach(function(kk){ G[kk] = vec(); });
     FJ_EMP.forEach(function(e){ var L = out.emp[e]; G.pos0 += L.pos0; G.acuerdo += L.acuerdo; keys.forEach(function(kk){ for (var i = 0; i < NS; i++) G[kk][i] += L[kk][i]; }); });
     G.posicion = vec(); G.margen = vec(); G.margenSinIntercompany = vec(); G.confianza = vec(); G.alerta = [];
@@ -6110,7 +6111,7 @@
       fila("Cobranza nueva (sin Evangelista)", "nuevaResto", "e") + fila("Cobranza nueva de Evangelista", "nuevaAesa", "e") + fila("Cobranza proyectada", "cobranza", "", false, "tot") +
       sec("Pagos") + fila("Proveedores · deuda del sistema (memo)", "provConocida", "c") + fila("Proveedores · pago proyectado (el mayor entre deuda y tendencia)", "proveedores", "m") +
       fila("Sueldos y cargas", "sueldos", "e") + (L.nof && L.nof.some(function(v){ return v; }) ? fila("NOF (necesidades operativas)", "nof", "e") : "") + fila("Impuestos (VEP / ARBA)", "impuestos", "e") + fila("Planes de pago ARCA", "arca", "c") +
-      fila("Débitos automáticos", "debitos", "e") + fila("Intereses, impuestos bancarios y comisiones", "intereses", "e") + fila("Otros", "otros", "e") + (L.prestamos && L.prestamos.some(function(v){ return v; }) ? fila("Cuotas de préstamos bancarios", "prestamos", "c") : "") + fila("Total pagos", "pagos", "", false, "tot") +
+      fila("Débitos automáticos", "debitos", "e") + fila("Intereses, impuestos bancarios y comisiones", "intereses", "e") + fila("Otros", "otros", "e") + (L.prestamos && L.prestamos.some(function(v){ return v; }) ? fila("Cuotas de préstamos bancarios", "prestamos", "c") : "") + (L.finEcheq && L.finEcheq.some(function(v){ return v; }) ? fila("Echeqs propios descontados que vencen", "finEcheq", "c") : "") + fila("Total pagos", "pagos", "", false, "tot") +
       sec("Resultado") + fila("Resultado de la semana", "resultado", "", false, "tot") + fila("Posición bancaria acumulada", "posicion", "", false, "tot") +
       (L.acuerdo ? fila("Margen de acuerdos sin usar", "margen", "", false) : "") + (ESP ? fila("Margen sin pasar fondos entre empresas", "margenSinIntercompany", "", false) : "") + conf + alr +
       '</tbody></table></div><div class="helptext" style="margin-top:8px;">Conocido = ya está en el sistema (facturas a cobrar, echeqs en cartera, deuda a proveedores, cuotas de ARCA). Estimado = ritmo de agosto a octubre. La semana 1 cuenta solo los días que faltan (' + Math.round(R.fraccionS1 * 100) + '% de la semana) en las partidas de tendencia.' + (pr.cumpl < 1 ? ' <b>Cumplimiento de cobranzas al ' + Math.round(pr.cumpl * 100) + '%</b>: se aplica a las facturas sin fecha real y a la cobranza nueva estimada.' : '') + '</div></div>';
